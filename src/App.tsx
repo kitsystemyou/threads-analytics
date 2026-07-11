@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { Activity, RefreshCw, Key, MessageCircle, Heart, Repeat2, Eye, Quote, ExternalLink } from 'lucide-react';
+import { Activity, RefreshCw, MessageCircle, Heart, Repeat2, Eye, Quote, ExternalLink, Shield, LogOut, Info, Settings, AlertCircle } from 'lucide-react';
 
 interface PostData {
   id: string;
@@ -16,44 +16,221 @@ interface PostData {
 
 const App: React.FC = () => {
   const [token, setToken] = useState<string>(localStorage.getItem('threads_token') || '');
-  const [showTokenModal, setShowTokenModal] = useState<boolean>(!token);
-  const [tempToken, setTempToken] = useState<string>('');
+  const [clientId, setClientId] = useState<string>(localStorage.getItem('threads_client_id') || '');
+  const [clientSecret, setClientSecret] = useState<string>(localStorage.getItem('threads_client_secret') || '');
+  
+  // Default redirect URI is current origin + pathname
+  const defaultRedirectUri = window.location.origin + window.location.pathname;
+  const [redirectUri, setRedirectUri] = useState<string>(localStorage.getItem('threads_redirect_uri') || defaultRedirectUri);
+  
+  const [isMockMode, setIsMockMode] = useState<boolean>(localStorage.getItem('threads_is_mock') === 'true');
+  const [showAuthModal, setShowAuthModal] = useState<boolean>(!token);
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<'oauth' | 'demo'>('oauth');
   
   const [posts, setPosts] = useState<PostData[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
 
-  const saveToken = () => {
-    if (tempToken.trim()) {
-      setToken(tempToken);
-      localStorage.setItem('threads_token', tempToken);
-      setShowTokenModal(false);
+  // Handle URL redirect callback (detecting auth code)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+
+    if (code) {
+      if (code.startsWith('mock_auth_code_')) {
+        // Mock authentication simulation
+        setAuthLoading(true);
+        setError('');
+        
+        // Remove code from URL immediately to keep it clean
+        window.history.replaceState({}, document.title, window.location.pathname);
+        
+        setTimeout(() => {
+          const dummyToken = 'mock_long_lived_token_xyz123';
+          setToken(dummyToken);
+          localStorage.setItem('threads_token', dummyToken);
+          setIsMockMode(true);
+          localStorage.setItem('threads_is_mock', 'true');
+          setAuthLoading(false);
+          setShowAuthModal(false);
+        }, 1500); // Simulate network latency for token exchange
+      } else {
+        // Real Meta Threads OAuth exchange
+        // Retrieve credentials from localStorage
+        const storedClientId = localStorage.getItem('threads_client_id') || '';
+        const storedClientSecret = localStorage.getItem('threads_client_secret') || '';
+        const storedRedirectUri = localStorage.getItem('threads_redirect_uri') || defaultRedirectUri;
+
+        if (!storedClientId || !storedClientSecret) {
+          setError('Authentication failed: Missing App ID (Client ID) or App Secret.');
+          window.history.replaceState({}, document.title, window.location.pathname);
+          return;
+        }
+
+        exchangeCodeForToken(code, storedClientId, storedClientSecret, storedRedirectUri);
+        // Remove code from URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
+  }, []);
+
+  const exchangeCodeForToken = async (code: string, cId: string, cSecret: string, rUri: string) => {
+    setAuthLoading(true);
+    setError('');
+    try {
+      // Step 1: Exchange code for Short-Lived Access Token (1 hour validity)
+      // Form parameters according to Threads API spec
+      const tokenExchangeBody = new URLSearchParams({
+        client_id: cId,
+        client_secret: cSecret,
+        grant_type: 'authorization_code',
+        redirect_uri: rUri,
+        code: code
+      });
+
+      let shortLivedRes;
+      try {
+        // Try local development proxy first to bypass CORS
+        shortLivedRes = await fetch('/api-threads-oauth/oauth/access_token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: tokenExchangeBody.toString()
+        });
+      } catch (proxyError) {
+        console.warn('Proxy fetch failed. Falling back to direct API request (CORS may apply):', proxyError);
+        shortLivedRes = await fetch('https://graph.threads.net/oauth/access_token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: tokenExchangeBody.toString()
+        });
+      }
+
+      if (!shortLivedRes.ok) {
+        const errorText = await shortLivedRes.text();
+        let parsedError;
+        try { parsedError = JSON.parse(errorText); } catch { parsedError = {}; }
+        throw new Error(parsedError.error_message || parsedError.error?.message || `Failed to fetch access token (${shortLivedRes.status})`);
+      }
+
+      const shortLivedData = await shortLivedRes.json();
+      const shortLivedToken = shortLivedData.access_token;
+
+      // Step 2: Exchange Short-Lived Access Token for Long-Lived Access Token (60 days validity)
+      let longLivedRes;
+      const longLivedUrlPath = `/access_token?grant_type=th_exchange_token&client_secret=${cSecret}&access_token=${shortLivedToken}`;
+      
+      try {
+        longLivedRes = await fetch(`/api-threads-oauth${longLivedUrlPath}`);
+      } catch (proxyError) {
+        console.warn('Proxy exchange failed. Falling back to direct exchange:', proxyError);
+        longLivedRes = await fetch(`https://graph.threads.net${longLivedUrlPath}`);
+      }
+
+      if (!longLivedRes.ok) {
+        const errorText = await longLivedRes.text();
+        let parsedError;
+        try { parsedError = JSON.parse(errorText); } catch { parsedError = {}; }
+        throw new Error(parsedError.error_message || parsedError.error?.message || `Failed to exchange for long-lived token (${longLivedRes.status})`);
+      }
+
+      const longLivedData = await longLivedRes.json();
+      const longLivedToken = longLivedData.access_token;
+
+      // Store results
+      setToken(longLivedToken);
+      localStorage.setItem('threads_token', longLivedToken);
+      setIsMockMode(false);
+      localStorage.setItem('threads_is_mock', 'false');
+      setShowAuthModal(false);
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || 'OAuth token exchange failed.');
+      setShowAuthModal(true);
+    } finally {
+      setAuthLoading(false);
     }
   };
 
-  const clearToken = () => {
+  const handleOAuthLoginRedirect = () => {
+    if (!clientId.trim() || !clientSecret.trim()) {
+      setError('Please fill in both Client ID and Client Secret.');
+      return;
+    }
+
+    // Save configuration before redirecting
+    localStorage.setItem('threads_client_id', clientId.trim());
+    localStorage.setItem('threads_client_secret', clientSecret.trim());
+    localStorage.setItem('threads_redirect_uri', redirectUri.trim());
+
+    // Build Threads OAuth authorization URL
+    // Required Scopes: threads_basic (basic profile/media), threads_manage_insights (insights metrics)
+    const scope = 'threads_basic,threads_manage_insights';
+    const authUrl = `https://threads.net/oauth/authorize?client_id=${clientId.trim()}&redirect_uri=${encodeURIComponent(redirectUri.trim())}&scope=${scope}&response_type=code`;
+
+    // Redirect user to Threads authorization screen
+    window.location.href = authUrl;
+  };
+
+  const handleMockLogin = () => {
+    // Save dummy credentials so validation is satisfied if edited later
+    localStorage.setItem('threads_client_id', 'mock_client_id_123');
+    localStorage.setItem('threads_client_secret', 'mock_client_secret_abc');
+    localStorage.setItem('threads_redirect_uri', defaultRedirectUri);
+    
+    // Redirect to self with a mock authorization code parameter
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.set('code', 'mock_auth_code_' + Math.random().toString(36).substring(2, 9));
+    window.location.href = currentUrl.toString();
+  };
+
+  const handleLogout = () => {
     setToken('');
     localStorage.removeItem('threads_token');
+    localStorage.removeItem('threads_is_mock');
     setPosts([]);
-    setShowTokenModal(true);
+    setError('');
+    setIsMockMode(false);
+    setShowAuthModal(true);
   };
 
   const fetchInsights = async () => {
     if (!token) {
-      setShowTokenModal(true);
+      setShowAuthModal(true);
       return;
     }
     
     setLoading(true);
     setError('');
     
+    // If mock mode is active, simulate api latency and return high-quality mock insights
+    if (isMockMode || token.startsWith('mock_long_lived_token')) {
+      setTimeout(() => {
+        setPosts([
+          { id: '1', text: "Just launched our Threads Analytics Dashboard! 🚀 Fully responsive and styled in dynamic glassmorphism.", timestamp: new Date().toISOString(), views: 2450, likes: 620, replies: 48, reposts: 34, quotes: 12, engagementRate: ((620+48+34+12)/2450)*100 },
+          { id: '2', text: "What features would you love to see next in the Threads analytics? Tell me in the replies below! 👇", timestamp: new Date(Date.now() - 86400000).toISOString(), views: 1890, likes: 210, replies: 112, reposts: 18, quotes: 4, engagementRate: ((210+112+18+4)/1890)*100 },
+          { id: '3', text: "Meta's new API upgrades are fascinating. Threads OAuth flow provides smooth, secure authentication for user tokens. 🧵", timestamp: new Date(Date.now() - 172800000).toISOString(), views: 4200, likes: 1150, replies: 198, reposts: 145, quotes: 52, engagementRate: ((1150+198+145+52)/4200)*100 },
+          { id: '4', text: "Coffee + Clean Code = Productive Saturday morning. ☕💻", timestamp: new Date(Date.now() - 259200000).toISOString(), views: 980, likes: 245, replies: 14, reposts: 6, quotes: 2, engagementRate: ((245+14+6+2)/980)*100 },
+          { id: '5', text: "Design systems aren't just colors; they're constraints that foster user delight and velocity. Agree or disagree?", timestamp: new Date(Date.now() - 345600000).toISOString(), views: 1530, likes: 380, replies: 42, reposts: 15, quotes: 8, engagementRate: ((380+42+15+8)/1530)*100 }
+        ]);
+        setLoading(false);
+      }, 1200);
+      return;
+    }
+    
     try {
-      // Step 1: Fetch recent posts
-      // Note: We use graph.threads.net based on official Meta API
+      // Step 1: Fetch recent posts from Threads API
       const threadsRes = await fetch(`https://graph.threads.net/v1.0/me/threads?fields=id,text,timestamp&access_token=${token}`);
-      if (!threadsRes.ok) throw new Error('Failed to fetch posts. Please check your Access Token.');
-      const threadsData = await threadsRes.json();
+      if (!threadsRes.ok) {
+        if (threadsRes.status === 401) {
+          // Token expired or invalid
+          handleLogout();
+          throw new Error('Access Token expired or invalid. Please login again.');
+        }
+        throw new Error(`Failed to fetch posts. (Status: ${threadsRes.status})`);
+      }
       
+      const threadsData = await threadsRes.json();
       const latestThreads = (threadsData.data || []).slice(0, 10);
       
       if (latestThreads.length === 0) {
@@ -98,7 +275,7 @@ const App: React.FC = () => {
               engagementRate
             };
           } catch (e) {
-            // Fallback for demo if API fails or post lacks insight permissions
+            // Fallback: load post basic info but with zero insights if API fails
             return {
               id: post.id,
               text: post.text || 'No text content',
@@ -112,25 +289,17 @@ const App: React.FC = () => {
       setPosts(postsWithInsights);
     } catch (err: any) {
       console.error(err);
-      setError(err.message || 'An error occurred while fetching data.');
-      
-      // If we get an error (e.g., CORS or invalid token), load some beautiful mock data to show the UI
-      setPosts([
-        { id: '1', text: "Just launched my new portfolio! 🚀", timestamp: new Date().toISOString(), views: 1205, likes: 340, replies: 25, reposts: 15, quotes: 5, engagementRate: ((340+25+15+5)/1205)*100 },
-        { id: '2', text: "What's everyone working on this weekend?", timestamp: new Date(Date.now() - 86400000).toISOString(), views: 890, likes: 120, replies: 45, reposts: 2, quotes: 1, engagementRate: ((120+45+2+1)/890)*100 },
-        { id: '3', text: "React vs Vue in 2026. My thoughts... 🧵", timestamp: new Date(Date.now() - 172800000).toISOString(), views: 2400, likes: 850, replies: 120, reposts: 85, quotes: 30, engagementRate: ((850+120+85+30)/2400)*100 },
-        { id: '4', text: "Coffee is the only valid design pattern. ☕", timestamp: new Date(Date.now() - 259200000).toISOString(), views: 500, likes: 95, replies: 8, reposts: 0, quotes: 0, engagementRate: ((95+8)/500)*100 }
-      ]);
+      setError(err.message || 'An error occurred while fetching real data.');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (token && !showTokenModal) {
+    if (token && !showAuthModal) {
       fetchInsights();
     }
-  }, [token, showTokenModal]);
+  }, [token, showAuthModal]);
 
   // Aggregate stats
   const totalViews = posts.reduce((sum, p) => sum + p.views, 0);
@@ -148,44 +317,163 @@ const App: React.FC = () => {
 
   return (
     <div className="container animate-fade-in">
-      {showTokenModal && (
+      {/* OAuth Token Exchange Loading Overlay */}
+      {authLoading && (
         <div className="modal-overlay">
-          <div className="modal-content">
-            <h2 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Key size={24} color="var(--accent-color)" /> API Setup
-            </h2>
-            <p className="text-muted" style={{ marginBottom: '1.5rem', fontSize: '0.9rem' }}>
-              To fetch your Threads insights without a backend, please provide your Threads API Access Token. Your token is only stored locally in your browser.
+          <div className="modal-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '3rem 2rem' }}>
+            <div className="spinner" style={{ width: '50px', height: '50px', borderWidth: '5px', marginBottom: '1.5rem' }} />
+            <h3>Authenticating with Threads</h3>
+            <p className="text-muted" style={{ marginTop: '0.5rem', fontSize: '0.9rem' }}>
+              Exchanging authorization code for secure access tokens...
             </p>
-            <div className="input-group">
-              <label className="input-label">Access Token</label>
-              <input 
-                type="password" 
-                className="input-field" 
-                placeholder="EAA..."
-                value={tempToken}
-                onChange={(e) => setTempToken(e.target.value)}
-              />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '1.5rem' }}>
-              <button className="btn btn-primary" onClick={saveToken}>Save Token</button>
-            </div>
           </div>
         </div>
       )}
 
+      {/* Connection & Setup Modal */}
+      {showAuthModal && !authLoading && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '550px' }}>
+            <h2 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Shield size={24} color="var(--accent-color)" /> Threads Login Integration
+            </h2>
+            <p className="text-muted" style={{ marginBottom: '1.5rem', fontSize: '0.9rem' }}>
+              Connect your Threads account using OAuth 2.0 to access secure insights metrics.
+            </p>
+
+            {/* Tabs for setup type */}
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--panel-border)', marginBottom: '1.5rem' }}>
+              <button 
+                onClick={() => setActiveTab('oauth')} 
+                style={{ 
+                  flex: 1, 
+                  padding: '10px 0', 
+                  background: 'none', 
+                  border: 'none', 
+                  color: activeTab === 'oauth' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  borderBottom: activeTab === 'oauth' ? '2px solid var(--accent-color)' : 'none',
+                  fontWeight: activeTab === 'oauth' ? '600' : '400',
+                  cursor: 'pointer'
+                }}
+              >
+                Meta App OAuth
+              </button>
+              <button 
+                onClick={() => setActiveTab('demo')} 
+                style={{ 
+                  flex: 1, 
+                  padding: '10px 0', 
+                  background: 'none', 
+                  border: 'none', 
+                  color: activeTab === 'demo' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  borderBottom: activeTab === 'demo' ? '2px solid var(--accent-color)' : 'none',
+                  fontWeight: activeTab === 'demo' ? '600' : '400',
+                  cursor: 'pointer'
+                }}
+              >
+                Quick Demo (Mock)
+              </button>
+            </div>
+
+            {error && (
+              <div className="glass-panel" style={{ padding: '0.75rem 1rem', marginBottom: '1rem', borderLeft: '4px solid var(--error-color)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <AlertCircle size={16} color="var(--error-color)" />
+                <p style={{ color: 'var(--error-color)', fontSize: '0.85rem' }}>{error}</p>
+              </div>
+            )}
+
+            {activeTab === 'oauth' ? (
+              <div>
+                <div className="input-group">
+                  <label className="input-label">Threads App Client ID</label>
+                  <input 
+                    type="text" 
+                    className="input-field" 
+                    placeholder="Enter Meta App ID"
+                    value={clientId}
+                    onChange={(e) => setClientId(e.target.value)}
+                  />
+                </div>
+                <div className="input-group">
+                  <label className="input-label">Threads App Client Secret</label>
+                  <input 
+                    type="password" 
+                    className="input-field" 
+                    placeholder="Enter Meta App Secret"
+                    value={clientSecret}
+                    onChange={(e) => setClientSecret(e.target.value)}
+                  />
+                </div>
+                <div className="input-group">
+                  <label className="input-label">Redirect URI</label>
+                  <input 
+                    type="text" 
+                    className="input-field" 
+                    value={redirectUri}
+                    onChange={(e) => setRedirectUri(e.target.value)}
+                  />
+                  <small style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginTop: '4px', display: 'block' }}>
+                    * Must be registered in your Meta Developer Console settings.
+                  </small>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', margin: '1rem 0' }}>
+                  <Info size={20} color="var(--text-secondary)" style={{ flexShrink: 0, marginTop: '2px' }} />
+                  <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
+                    Clicking login will redirect you to Threads Authorization window. Ensure that your Meta App has <strong>threads_basic</strong> and <strong>threads_manage_insights</strong> permissions enabled.
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '1.5rem' }}>
+                  <button className="btn btn-primary" onClick={handleOAuthLoginRedirect} style={{ width: '100%' }}>
+                    Login with Threads
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '1rem 0' }}>
+                <p className="text-muted" style={{ marginBottom: '1.5rem', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                  No Meta Developer Account setup? Simulate the entire login process, OAuth code callback, and access token exchange flow in sandbox mode.
+                </p>
+                <button className="btn btn-primary" onClick={handleMockLogin} style={{ width: '100%', background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', boxShadow: '0 4px 14px rgba(16, 185, 129, 0.3)' }}>
+                  Launch Mock Demo
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Main Dashboard Header */}
       <header className="header">
         <div>
           <h1 className="text-gradient" style={{ fontSize: '2.5rem', display: 'flex', alignItems: 'center', gap: '12px' }}>
             <Activity size={36} color="var(--accent-color)" /> Threads Analytics
           </h1>
-          <p className="text-muted">Analyze your recent post performance.</p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+            <p className="text-muted">Analyze your recent post performance.</p>
+            {token && (
+              <span className="badge" style={{ 
+                background: isMockMode ? 'rgba(16, 185, 129, 0.1)' : 'rgba(236, 72, 153, 0.1)', 
+                color: isMockMode ? 'var(--success-color)' : 'var(--accent-color)'
+              }}>
+                {isMockMode ? 'Demo Sandbox' : 'Real API Connected'}
+              </span>
+            )}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '12px' }}>
-          <button className="btn btn-secondary" onClick={clearToken}>
-            <Key size={18} /> Token
-          </button>
-          <button className="btn btn-primary" onClick={fetchInsights} disabled={loading}>
+          {token && (
+            <>
+              <button className="btn btn-secondary" onClick={() => setShowAuthModal(true)}>
+                <Settings size={18} /> Credentials
+              </button>
+              <button className="btn btn-secondary" onClick={handleLogout} style={{ border: '1px solid rgba(239, 68, 68, 0.2)', color: 'var(--error-color)' }}>
+                <LogOut size={18} /> Log out
+              </button>
+            </>
+          )}
+          <button className="btn btn-primary" onClick={fetchInsights} disabled={loading || !token}>
             {loading ? <div className="spinner" /> : <RefreshCw size={18} />}
             {loading ? 'Refreshing...' : 'Refresh Data'}
           </button>
@@ -194,10 +482,11 @@ const App: React.FC = () => {
 
       {error && (
         <div className="glass-panel" style={{ padding: '1rem', marginBottom: '2rem', borderLeft: '4px solid var(--error-color)' }}>
-          <p style={{ color: 'var(--error-color)' }}>{error} - Displaying mockup data for demonstration.</p>
+          <p style={{ color: 'var(--error-color)' }}>{error}</p>
         </div>
       )}
 
+      {/* Analytics KPI Panels */}
       <div className="grid grid-cols-4 delay-100" style={{ marginBottom: '2.5rem' }}>
         <div className="glass-panel" style={{ padding: '1.5rem' }}>
           <p className="text-muted" style={{ fontSize: '0.875rem', marginBottom: '0.5rem' }}>Total Posts</p>
@@ -217,6 +506,7 @@ const App: React.FC = () => {
         </div>
       </div>
 
+      {/* Analytics Charts */}
       <div className="grid grid-cols-2 delay-200" style={{ marginBottom: '2.5rem' }}>
         <div className="glass-panel" style={{ padding: '1.5rem' }}>
           <h3 style={{ marginBottom: '1.5rem' }}>Views (Last 10 Posts)</h3>
@@ -261,6 +551,7 @@ const App: React.FC = () => {
         </div>
       </div>
 
+      {/* Posts Details Data Grid */}
       <div className="glass-panel delay-300" style={{ padding: '1.5rem' }}>
         <h3 style={{ marginBottom: '1.5rem' }}>Post Details</h3>
         {posts.length > 0 ? (
@@ -284,9 +575,16 @@ const App: React.FC = () => {
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <span style={{ fontWeight: 500 }}>{formatText(post.text)}</span>
-                        <a href={`https://threads.net/t/${post.id}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-secondary)' }}>
-                          <ExternalLink size={14} />
-                        </a>
+                        {/* If it's a real post (not mock), show external link */}
+                        {!isMockMode && !post.id.startsWith('mock') ? (
+                          <a href={`https://threads.net/t/${post.id}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-secondary)' }}>
+                            <ExternalLink size={14} />
+                          </a>
+                        ) : (
+                          <span style={{ color: 'var(--text-secondary)', cursor: 'default' }}>
+                            <ExternalLink size={14} style={{ opacity: 0.3 }} />
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="text-muted">{new Date(post.timestamp).toLocaleDateString()}</td>
@@ -296,7 +594,10 @@ const App: React.FC = () => {
                     <td>{post.reposts.toLocaleString()}</td>
                     <td>{post.quotes.toLocaleString()}</td>
                     <td>
-                      <span className="badge">
+                      <span className="badge" style={{ 
+                        background: 'rgba(16, 185, 129, 0.1)', 
+                        color: 'var(--success-color)' 
+                      }}>
                         {post.engagementRate.toFixed(1)}%
                       </span>
                     </td>
