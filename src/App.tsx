@@ -16,12 +16,17 @@ interface PostData {
 
 const App: React.FC = () => {
   const [token, setToken] = useState<string>(localStorage.getItem('threads_token') || '');
-  const [clientId, setClientId] = useState<string>(localStorage.getItem('threads_client_id') || '');
-  const [clientSecret, setClientSecret] = useState<string>(localStorage.getItem('threads_client_secret') || '');
   
-  // Default redirect URI is current origin + pathname
+  // Read credentials configured on the development server (via Vite env variables)
+  const clientId = import.meta.env.VITE_THREADS_CLIENT_ID || '';
+  const clientSecret = import.meta.env.VITE_THREADS_CLIENT_SECRET || '';
   const defaultRedirectUri = window.location.origin + window.location.pathname;
-  const [redirectUri, setRedirectUri] = useState<string>(localStorage.getItem('threads_redirect_uri') || defaultRedirectUri);
+  const redirectUri = import.meta.env.VITE_THREADS_REDIRECT_URI || defaultRedirectUri;
+
+  // Check if server configuration is set and valid (not default placeholder text)
+  const isServerConfigured = clientId && clientSecret && 
+    clientId !== 'your_threads_client_id_here' && 
+    clientSecret !== 'your_threads_client_secret_here';
   
   const [isMockMode, setIsMockMode] = useState<boolean>(localStorage.getItem('threads_is_mock') === 'true');
   const [showAuthModal, setShowAuthModal] = useState<boolean>(!token);
@@ -56,36 +61,31 @@ const App: React.FC = () => {
           setShowAuthModal(false);
         }, 1500); // Simulate network latency for token exchange
       } else {
-        // Real Meta Threads OAuth exchange
-        // Retrieve credentials from localStorage
-        const storedClientId = localStorage.getItem('threads_client_id') || '';
-        const storedClientSecret = localStorage.getItem('threads_client_secret') || '';
-        const storedRedirectUri = localStorage.getItem('threads_redirect_uri') || defaultRedirectUri;
-
-        if (!storedClientId || !storedClientSecret) {
-          setError('Authentication failed: Missing App ID (Client ID) or App Secret.');
+        // Real Meta Threads OAuth exchange using server configured credentials
+        if (!isServerConfigured) {
+          setError('Authentication failed: Server credentials are not configured or invalid in .env.');
           window.history.replaceState({}, document.title, window.location.pathname);
           return;
         }
 
-        exchangeCodeForToken(code, storedClientId, storedClientSecret, storedRedirectUri);
+        exchangeCodeForToken(code);
         // Remove code from URL
         window.history.replaceState({}, document.title, window.location.pathname);
       }
     }
-  }, []);
+  }, [isServerConfigured]);
 
-  const exchangeCodeForToken = async (code: string, cId: string, cSecret: string, rUri: string) => {
+  const exchangeCodeForToken = async (code: string) => {
     setAuthLoading(true);
     setError('');
     try {
       // Step 1: Exchange code for Short-Lived Access Token (1 hour validity)
       // Form parameters according to Threads API spec
       const tokenExchangeBody = new URLSearchParams({
-        client_id: cId,
-        client_secret: cSecret,
+        client_id: clientId,
+        client_secret: clientSecret,
         grant_type: 'authorization_code',
-        redirect_uri: rUri,
+        redirect_uri: redirectUri,
         code: code
       });
 
@@ -118,7 +118,7 @@ const App: React.FC = () => {
 
       // Step 2: Exchange Short-Lived Access Token for Long-Lived Access Token (60 days validity)
       let longLivedRes;
-      const longLivedUrlPath = `/access_token?grant_type=th_exchange_token&client_secret=${cSecret}&access_token=${shortLivedToken}`;
+      const longLivedUrlPath = `/access_token?grant_type=th_exchange_token&client_secret=${clientSecret}&access_token=${shortLivedToken}`;
       
       try {
         longLivedRes = await fetch(`/api-threads-oauth${longLivedUrlPath}`);
@@ -153,15 +153,10 @@ const App: React.FC = () => {
   };
 
   const handleOAuthLoginRedirect = () => {
-    if (!clientId.trim() || !clientSecret.trim()) {
-      setError('Please fill in both Client ID and Client Secret.');
+    if (!isServerConfigured) {
+      setError('Please configure VITE_THREADS_CLIENT_ID and VITE_THREADS_CLIENT_SECRET in the development server .env file.');
       return;
     }
-
-    // Save configuration before redirecting
-    localStorage.setItem('threads_client_id', clientId.trim());
-    localStorage.setItem('threads_client_secret', clientSecret.trim());
-    localStorage.setItem('threads_redirect_uri', redirectUri.trim());
 
     // Build Threads OAuth authorization URL
     // Required Scopes: threads_basic (basic profile/media), threads_manage_insights (insights metrics)
@@ -173,11 +168,6 @@ const App: React.FC = () => {
   };
 
   const handleMockLogin = () => {
-    // Save dummy credentials so validation is satisfied if edited later
-    localStorage.setItem('threads_client_id', 'mock_client_id_123');
-    localStorage.setItem('threads_client_secret', 'mock_client_secret_abc');
-    localStorage.setItem('threads_redirect_uri', defaultRedirectUri);
-    
     // Redirect to self with a mock authorization code parameter
     const currentUrl = new URL(window.location.href);
     currentUrl.searchParams.set('code', 'mock_auth_code_' + Math.random().toString(36).substring(2, 9));
@@ -384,51 +374,50 @@ const App: React.FC = () => {
 
             {activeTab === 'oauth' ? (
               <div>
-                <div className="input-group">
-                  <label className="input-label">Threads App Client ID</label>
-                  <input 
-                    type="text" 
-                    className="input-field" 
-                    placeholder="Enter Meta App ID"
-                    value={clientId}
-                    onChange={(e) => setClientId(e.target.value)}
-                  />
-                </div>
-                <div className="input-group">
-                  <label className="input-label">Threads App Client Secret</label>
-                  <input 
-                    type="password" 
-                    className="input-field" 
-                    placeholder="Enter Meta App Secret"
-                    value={clientSecret}
-                    onChange={(e) => setClientSecret(e.target.value)}
-                  />
-                </div>
-                <div className="input-group">
-                  <label className="input-label">Redirect URI</label>
-                  <input 
-                    type="text" 
-                    className="input-field" 
-                    value={redirectUri}
-                    onChange={(e) => setRedirectUri(e.target.value)}
-                  />
-                  <small style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginTop: '4px', display: 'block' }}>
-                    * Must be registered in your Meta Developer Console settings.
-                  </small>
-                </div>
+                {isServerConfigured ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    <div style={{ padding: '1rem', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', border: '1px solid var(--panel-border)' }}>
+                      <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+                        <strong>Active Server Configuration:</strong>
+                      </p>
+                      <div style={{ fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <div><span className="text-muted">Client ID:</span> <code>{clientId.substring(0, 4)}...{clientId.substring(clientId.length - 4)}</code></div>
+                        <div><span className="text-muted">Redirect URI:</span> <code>{redirectUri}</code></div>
+                      </div>
+                    </div>
 
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', margin: '1rem 0' }}>
-                  <Info size={20} color="var(--text-secondary)" style={{ flexShrink: 0, marginTop: '2px' }} />
-                  <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
-                    Clicking login will redirect you to Threads Authorization window. Ensure that your Meta App has <strong>threads_basic</strong> and <strong>threads_manage_insights</strong> permissions enabled.
-                  </p>
-                </div>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px' }}>
+                      <Info size={20} color="var(--text-secondary)" style={{ flexShrink: 0, marginTop: '2px' }} />
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
+                        Clicking login will redirect you to the Threads Authorization window. Ensure that your Meta App has <strong>threads_basic</strong> and <strong>threads_manage_insights</strong> permissions enabled and that you are registered as a Threads Tester.
+                      </p>
+                    </div>
 
-                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '1.5rem' }}>
-                  <button className="btn btn-primary" onClick={handleOAuthLoginRedirect} style={{ width: '100%' }}>
-                    Login with Threads
-                  </button>
-                </div>
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '1rem' }}>
+                      <button className="btn btn-primary" onClick={handleOAuthLoginRedirect} style={{ width: '100%' }}>
+                        Login with Threads
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', padding: '1rem', background: 'rgba(239, 68, 68, 0.05)', border: '1px solid rgba(239, 68, 68, 0.2)', borderRadius: '10px' }}>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', color: 'var(--error-color)', fontWeight: '600', fontSize: '0.95rem' }}>
+                      <AlertCircle size={20} />
+                      Server Credentials Missing
+                    </div>
+                    <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+                      The development server is missing Meta Threads API OAuth credentials. Please configure them in your local environment setup:
+                    </p>
+                    <div style={{ background: 'rgba(0, 0, 0, 0.3)', padding: '0.75rem', borderRadius: '6px', fontSize: '0.8rem', fontFamily: 'monospace', color: '#fda4af' }}>
+                      # In your project root .env file:<br />
+                      VITE_THREADS_CLIENT_ID=your_client_id<br />
+                      VITE_THREADS_CLIENT_SECRET=your_client_secret
+                    </div>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                      After modifying the <code>.env</code> file, please restart the development server and refresh the page to apply the changes.
+                    </p>
+                  </div>
+                )}
               </div>
             ) : (
               <div style={{ textAlign: 'center', padding: '1rem 0' }}>
